@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/util/soraerror"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -811,7 +812,7 @@ func (h *OpenAIGatewayHandler) anthropicStreamingAwareError(c *gin.Context, stat
 
 // handleAnthropicFailoverExhausted maps upstream failover errors to Anthropic format.
 func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError, streamStarted bool) {
-	status, errType, errMsg := h.mapUpstreamError(failoverErr.StatusCode)
+	status, errType, errMsg := h.mapUpstreamError(failoverErr.StatusCode, failoverErr.ResponseHeaders, failoverErr.ResponseBody)
 	h.anthropicStreamingAwareError(c, status, errType, errMsg, streamStarted)
 }
 
@@ -1453,18 +1454,37 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 	service.SetOpsUpstreamError(c, statusCode, upstreamMsg, "")
 
 	// 使用默认的错误映射
-	status, errType, errMsg := h.mapUpstreamError(statusCode)
+	status, errType, errMsg := h.mapUpstreamError(statusCode, responseHeaders, responseBody)
 	h.handleStreamingAwareError(c, status, errType, errMsg, streamStarted)
 }
 
 // handleFailoverExhaustedSimple 简化版本，用于没有响应体的情况
 func (h *OpenAIGatewayHandler) handleFailoverExhaustedSimple(c *gin.Context, statusCode int, streamStarted bool) {
-	status, errType, errMsg := h.mapUpstreamError(statusCode)
+	status, errType, errMsg := h.mapUpstreamError(statusCode, nil, nil)
 	service.SetOpsUpstreamError(c, statusCode, errMsg, "")
 	h.handleStreamingAwareError(c, status, errType, errMsg, streamStarted)
 }
 
-func (h *OpenAIGatewayHandler) mapUpstreamError(statusCode int) (int, string, string) {
+func (h *OpenAIGatewayHandler) mapUpstreamError(statusCode int, responseHeaders http.Header, responseBody []byte) (int, string, string) {
+	if soraerror.IsCloudflareChallengeResponse(statusCode, responseHeaders, responseBody) {
+		baseMsg := fmt.Sprintf("Upstream request blocked by Cloudflare challenge (HTTP %d). Please switch to a clean proxy/network and retry.", statusCode)
+		return http.StatusBadGateway, "upstream_error", soraerror.FormatCloudflareChallengeMessage(baseMsg, responseHeaders, responseBody)
+	}
+
+	upstreamCode, upstreamMessage := soraerror.ExtractUpstreamErrorCodeAndMessage(responseBody)
+	if strings.EqualFold(upstreamCode, "cf_shield_429") {
+		baseMsg := "Upstream request blocked by Cloudflare shield (429). Please switch to a clean proxy/network and retry."
+		return http.StatusTooManyRequests, "rate_limit_error", soraerror.FormatCloudflareChallengeMessage(baseMsg, responseHeaders, responseBody)
+	}
+	if strings.TrimSpace(upstreamMessage) != "" {
+		switch statusCode {
+		case 401, 403, 404, 500, 502, 503, 504:
+			return http.StatusBadGateway, "upstream_error", upstreamMessage
+		case 429:
+			return http.StatusTooManyRequests, "rate_limit_error", upstreamMessage
+		}
+	}
+
 	switch statusCode {
 	case 401:
 		return http.StatusBadGateway, "upstream_error", "Upstream authentication failed, please contact administrator"

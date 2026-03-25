@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/Wei-Shaw/sub2api/internal/util/soraerror"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
@@ -166,7 +167,8 @@ func (s *GatewayService) ForwardAsResponses(
 		}
 
 		// Non-failover error: return Responses-formatted error to client
-		writeResponsesError(c, mapUpstreamStatusCode(resp.StatusCode), "server_error", upstreamMsg)
+		clientStatus, clientCode, clientMessage := mapResponsesUpstreamError(resp.StatusCode, resp.Header, respBody, upstreamMsg)
+		writeResponsesError(c, clientStatus, clientCode, clientMessage)
 		return nil, fmt.Errorf("upstream error: %d %s", resp.StatusCode, upstreamMsg)
 	}
 
@@ -515,4 +517,30 @@ func mapUpstreamStatusCode(code int) int {
 		return http.StatusBadGateway
 	}
 	return code
+}
+
+func mapResponsesUpstreamError(statusCode int, responseHeaders http.Header, responseBody []byte, fallbackMessage string) (int, string, string) {
+	if soraerror.IsCloudflareChallengeResponse(statusCode, responseHeaders, responseBody) {
+		baseMsg := fmt.Sprintf("Upstream request blocked by Cloudflare challenge (HTTP %d). Please switch to a clean proxy/network and retry.", statusCode)
+		return http.StatusBadGateway, "server_error", soraerror.FormatCloudflareChallengeMessage(baseMsg, responseHeaders, responseBody)
+	}
+
+	upstreamCode, upstreamMessage := soraerror.ExtractUpstreamErrorCodeAndMessage(responseBody)
+	if strings.EqualFold(upstreamCode, "cf_shield_429") {
+		baseMsg := "Upstream request blocked by Cloudflare shield (429). Please switch to a clean proxy/network and retry."
+		return http.StatusTooManyRequests, "rate_limit_error", soraerror.FormatCloudflareChallengeMessage(baseMsg, responseHeaders, responseBody)
+	}
+
+	msg := strings.TrimSpace(upstreamMessage)
+	if msg == "" {
+		msg = strings.TrimSpace(fallbackMessage)
+	}
+	if msg == "" {
+		msg = "Upstream request failed"
+	}
+
+	if statusCode == http.StatusTooManyRequests {
+		return http.StatusTooManyRequests, "rate_limit_error", msg
+	}
+	return mapUpstreamStatusCode(statusCode), "server_error", msg
 }
