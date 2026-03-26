@@ -1093,7 +1093,7 @@ func resolveOpenAIUpstreamOriginator(c *gin.Context, isOfficialClient bool) stri
 	if isOfficialClient {
 		return "codex_cli_rs"
 	}
-	return "opencode"
+	return ""
 }
 
 // BindStickySession sets session -> account binding with standard TTL.
@@ -2572,10 +2572,10 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 		} else {
 			req.Header.Set("accept", "application/json")
 		}
-		if req.Header.Get("OpenAI-Beta") == "" {
+		if account.Type == AccountTypeOAuth && req.Header.Get("OpenAI-Beta") == "" {
 			req.Header.Set("OpenAI-Beta", "responses=experimental")
 		}
-		if req.Header.Get("originator") == "" {
+		if account.Type == AccountTypeOAuth && req.Header.Get("originator") == "" {
 			req.Header.Set("originator", "codex_cli_rs")
 		}
 		// 用隔离后的 session 标识符覆盖客户端透传值，防止跨用户会话碰撞。
@@ -2963,7 +2963,10 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 		req.Header.Del("session_id")
 
 		req.Header.Set("OpenAI-Beta", "responses=experimental")
-		req.Header.Set("originator", resolveOpenAIUpstreamOriginator(c, isCodexCLI))
+		originator := resolveOpenAIUpstreamOriginator(c, isCodexCLI)
+		if originator != "" {
+			req.Header.Set("originator", originator)
+		}
 		apiKeyID := getAPIKeyIDFromContext(c)
 		if isOpenAIResponsesCompactPath(c) {
 			req.Header.Set("accept", "application/json")
