@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -25,6 +26,44 @@ func NewAPIKeyAuthMiddleware(apiKeyService *service.APIKeyService, subscriptionS
 //   - 计费执行（Billing Enforcement）：过期/配额/订阅/余额检查 —— skipBilling 时整块跳过
 //
 // /v1/usage 端点只需鉴权，不需要计费执行（允许过期/配额耗尽的 Key 查询自身用量）。
+func normalizeIncomingAPIKey(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	trimmed = strings.Trim(trimmed, "\"'")
+	trimmed = strings.TrimSpace(trimmed)
+	if strings.Contains(trimmed, ",") {
+		trimmed = strings.TrimSpace(strings.Split(trimmed, ",")[0])
+	}
+	if strings.HasPrefix(strings.ToLower(trimmed), "bearer ") {
+		trimmed = strings.TrimSpace(trimmed[7:])
+	}
+	return trimmed
+}
+
+func maskAPIKeyForLog(key string) string {
+	trimmed := normalizeIncomingAPIKey(key)
+	if trimmed == "" {
+		return ""
+	}
+	if len(trimmed) <= 8 {
+		return trimmed
+	}
+	return trimmed[:6] + "..." + trimmed[len(trimmed)-4:]
+}
+
+func boolString(v bool) string {
+	if v {
+		return "true"
+	}
+	return "false"
+}
+
+func formatInt64(v int64) string {
+	return strconv.FormatInt(v, 10)
+}
+
 func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscriptionService *service.SubscriptionService, cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// ── 1. 提取 API Key ──────────────────────────────────────────
@@ -39,26 +78,60 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 		// 尝试从Authorization header中提取API key (Bearer scheme)
 		authHeader := c.GetHeader("Authorization")
 		var apiKeyString string
+		apiKeySource := ""
 
 		if authHeader != "" {
 			// 验证Bearer scheme
 			parts := strings.SplitN(authHeader, " ", 2)
 			if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
-				apiKeyString = strings.TrimSpace(parts[1])
+				apiKeyString = normalizeIncomingAPIKey(parts[1])
+				apiKeySource = "authorization"
 			}
 		}
 
 		// 如果Authorization header中没有，尝试从x-api-key header中提取
 		if apiKeyString == "" {
-			apiKeyString = c.GetHeader("x-api-key")
+			apiKeyString = normalizeIncomingAPIKey(c.GetHeader("x-api-key"))
+			if apiKeyString != "" {
+				apiKeySource = "x-api-key"
+			}
 		}
 
 		// 如果x-api-key header中没有，尝试从x-goog-api-key header中提取（Gemini CLI兼容）
 		if apiKeyString == "" {
-			apiKeyString = c.GetHeader("x-goog-api-key")
+			apiKeyString = normalizeIncomingAPIKey(c.GetHeader("x-goog-api-key"))
+			if apiKeyString != "" {
+				apiKeySource = "x-goog-api-key"
+			}
 		}
+		authPrefix := ""
+		if authHeader != "" {
+			parts := strings.SplitN(strings.TrimSpace(authHeader), " ", 2)
+			if len(parts) > 0 {
+				authPrefix = parts[0]
+			}
+		}
+		println("[api_key_auth] path=" + c.Request.URL.Path + " source=" + apiKeySource + " auth_present=" + boolString(authHeader != "") + " auth_prefix=" + authPrefix + " x_api_present=" + boolString(strings.TrimSpace(c.GetHeader("x-api-key")) != "") + " x_goog_present=" + boolString(strings.TrimSpace(c.GetHeader("x-goog-api-key")) != "") + " candidate=" + maskAPIKeyForLog(apiKeyString))
 
 		// 如果所有header都没有API key
+		if apiKeyString == "" {
+			fallbackCandidates := []struct {
+				raw    string
+				source string
+			}{
+				{raw: c.Query("api_key"), source: "query.api_key"},
+				{raw: c.Query("key"), source: "query.key"},
+			}
+			for _, candidate := range fallbackCandidates {
+				normalized := normalizeIncomingAPIKey(candidate.raw)
+				if normalized != "" {
+					apiKeyString = normalized
+					apiKeySource = candidate.source
+					break
+				}
+			}
+		}
+
 		if apiKeyString == "" {
 			AbortWithError(c, 401, "API_KEY_REQUIRED", "API key is required in Authorization header (Bearer scheme), x-api-key header, or x-goog-api-key header")
 			return
@@ -69,12 +142,15 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 		apiKey, err := apiKeyService.GetByKey(c.Request.Context(), apiKeyString)
 		if err != nil {
 			if errors.Is(err, service.ErrAPIKeyNotFound) {
+				println("[api_key_auth] failed path=" + c.Request.URL.Path + " source=" + apiKeySource + " candidate=" + maskAPIKeyForLog(apiKeyString) + " error=not_found")
 				AbortWithError(c, 401, "INVALID_API_KEY", "Invalid API key")
 				return
 			}
 			AbortWithError(c, 500, "INTERNAL_ERROR", "Failed to validate API key")
 			return
 		}
+
+		println("[api_key_auth] resolved path=" + c.Request.URL.Path + " source=" + apiKeySource + " candidate=" + maskAPIKeyForLog(apiKeyString) + " api_key_id=" + formatInt64(apiKey.ID) + " status=" + apiKey.Status + " user_id=" + formatInt64(apiKey.UserID))
 
 		// ── 3. 基础鉴权（始终执行） ─────────────────────────────────
 

@@ -1,0 +1,45 @@
+server:
+  host: "127.0.0.1"
+  port: 18080
+  mode: "debug"
+  trusted_proxies: []
+run_mode: "simple"
+security:
+  url_allowlist:
+    enabled: false
+    allow_private_hosts: true
+    allow_insecure_http: true
+gateway:
+  force_codex_cli: false
+  max_body_size: 268435456
+  openai_ws:
+    enabled: true
+    oauth_enabled: true
+    apikey_enabled: true
+    force_http: true
+    mode_router_v2_enabled: false
+    responses_websockets: false
+    responses_websockets_v2: false
+log:
+  level: "debug"
+  format: "console"
+  output:
+    to_stdout: true
+    to_file: false
+database:
+  host: "127.0.0.1"
+  port: 5432
+  user: "sub2api"
+  password: "sub2api"
+  dbname: "sub2api"
+  sslmode: "disable"
+redis:
+  host: "127.0.0.1"
+  port: 6379
+  password: ""
+  db: 0
+jwt:
+  secret: "dev-secret-sub2api-0123456789abcdefghijklmnopqrstuvwxyz"
+default:
+  admin_email: "admin@local"
+  admin_password: "admin123"

@@ -2988,9 +2988,9 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 		req.Header.Set("user-agent", customUA)
 	}
 
-	// 若开启 ForceCodexCLI，则强制将上游 User-Agent 伪装为 Codex CLI。
-	// 用于网关未透传/改写 User-Agent 时，仍能命中 Codex 侧识别逻辑。
-	if s.cfg != nil && s.cfg.Gateway.ForceCodexCLI {
+	// 仅 OpenAI OAuth/ChatGPT internal API 需要强制伪装为 Codex CLI。
+	// 对 OpenAI API Key / 自定义 base_url 上游，强制 Codex UA 可能触发风控或兼容问题。
+	if s.cfg != nil && s.cfg.Gateway.ForceCodexCLI && account.Type == AccountTypeOAuth {
 		req.Header.Set("user-agent", codexCLIUserAgent)
 	}
 
