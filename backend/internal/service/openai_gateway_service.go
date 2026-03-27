@@ -72,16 +72,30 @@ var openaiAllowedHeaders = map[string]bool{
 // OpenAI passthrough allowed headers whitelist.
 // 透传模式下仅放行这些低风险请求头，避免将非标准/环境噪声头传给上游触发风控。
 var openaiPassthroughAllowedHeaders = map[string]bool{
-	"accept":                true,
-	"accept-language":       true,
-	"content-type":          true,
-	"conversation_id":       true,
-	"openai-beta":           true,
-	"user-agent":            true,
-	"originator":            true,
-	"session_id":            true,
-	"x-codex-turn-state":    true,
-	"x-codex-turn-metadata": true,
+	"accept":                        true,
+	"accept-language":               true,
+	"content-type":                  true,
+	"conversation_id":               true,
+	"openai-beta":                   true,
+	"user-agent":                    true,
+	"originator":                    true,
+	"session_id":                    true,
+	"x-codex-turn-state":            true,
+	"x-codex-turn-metadata":         true,
+	"x-stainless-lang":              true,
+	"x-stainless-package-version":   true,
+	"x-stainless-os":                true,
+	"x-stainless-arch":              true,
+	"x-stainless-runtime":           true,
+	"x-stainless-runtime-version":   true,
+	"x-stainless-retry-count":       true,
+	"x-stainless-timeout":           true,
+	"x-stainless-read-timeout":      true,
+	"x-stainless-connect-timeout":   true,
+	"x-stainless-helper-method":     true,
+	"x-openai-client-user-agent":    true,
+	"x-openai-client-platform":      true,
+	"x-openai-client-platform-type": true,
 }
 
 // codex_cli_only 拒绝时记录的请求头白名单（仅用于诊断日志，不参与上游透传）
@@ -2605,9 +2619,24 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	if account.Type == AccountTypeOAuth && !openai.IsCodexCLIRequest(req.Header.Get("user-agent")) {
 		req.Header.Set("user-agent", codexCLIUserAgent)
 	}
+	// OpenAI JS / Stainless 客户端通常会携带 x-stainless-* 与 x-openai-client-* 头。
+	// 对 API key + 自定义 base_url 上游，尽量保留客户端原始 UA/指纹，减少接入层/WAF 误判。
+	if account.Type != AccountTypeOAuth {
+		if ua := strings.TrimSpace(c.GetHeader("User-Agent")); ua != "" {
+			req.Header.Set("user-agent", ua)
+		}
+	}
 
 	if req.Header.Get("content-type") == "" {
 		req.Header.Set("content-type", "application/json")
+	}
+	// OpenAI JS/Responses 客户端的较大 JSON 请求体更容易被部分接入层/WAF 误判。
+	// 明确声明长度，并为 responses/chat 路径补齐常见 JSON accept，尽量贴近官方 SDK 行为。
+	if len(body) > 0 {
+		req.ContentLength = int64(len(body))
+	}
+	if req.Header.Get("accept") == "" {
+		req.Header.Set("accept", "application/json, text/event-stream")
 	}
 
 	return req, nil
